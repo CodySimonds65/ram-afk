@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.codysimonds65.ram.afk",
   "name": "RAM AFK",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "contractVersion": "1.0",
   "publisher": "CodySimonds65",
   "description": "Staggered background keep-alive for enabled managed Roblox accounts.",
