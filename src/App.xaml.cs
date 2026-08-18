@@ -3,23 +3,116 @@ namespace RamAfk;
 public partial class App : Application
 {
     private PluginClient? _client;
+    public ManagedAccountRegistry ManagedAccounts { get; } = new();
+    public DiagnosticsLog Diagnostics { get; } = new();
     protected override void OnStartup(StartupEventArgs e)
-    { base.OnStartup(e); MainWindow = new MainWindow(); MainWindow.Show(); _client = PluginClient.FromArgs(e.Args); if (_client is not null) _ = ConnectHostAsync(_client); }
-    private static async Task ConnectHostAsync(PluginClient client)
+    {
+        base.OnStartup(e);
+        MainWindow = new MainWindow(ManagedAccounts, Diagnostics); MainWindow.Show();
+        _client = PluginClient.FromArgs(e.Args);
+        if (_client is not null) _ = ConnectHostAsync(_client, Diagnostics);
+        else Diagnostics.Info("Running without a launcher host pipe; no managed accounts are available.");
+    }
+    private static async Task ConnectHostAsync(PluginClient client, DiagnosticsLog diagnostics)
+    {
+        using var shutdown = new CancellationTokenSource();
+        var heartbeat = Task.CompletedTask;
+        var accountRefresh = Task.CompletedTask;
+        EventHandler<DiagnosticEntry>? forwardDiagnostic = null;
+        try
+        {
+            diagnostics.Info("Connecting to the launcher plugin host...");
+            await client.ConnectAsync();
+            diagnostics.Info("Launcher plugin host accepted the connection.");
+            forwardDiagnostic = (_, entry) => _ = SendDiagnosticAsync(client, entry, shutdown.Token);
+            diagnostics.Added += forwardDiagnostic;
+            await client.SendAsync("account.events.subscribe", new { }, Guid.NewGuid().ToString("N"), shutdown.Token);
+            heartbeat = SendHeartbeatsAsync(client, shutdown.Token);
+            accountRefresh = RefreshAccountsAsync(client, shutdown.Token);
+            while (true)
+            {
+                var envelope = await client.ReceiveAsync(shutdown.Token); if (envelope is null) break;
+                try
+                {
+                    DispatchHostMessage(client, envelope, ((App)Current).ManagedAccounts, diagnostics);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    diagnostics.Error($"Ignored malformed host message '{envelope.Type}': {ex.Message}");
+                }
+            }
+            diagnostics.Info("Host connection stopped.");
+        }
+        catch (Exception ex)
+        {
+            diagnostics.Error($"Host connection stopped: {ex.Message}");
+        }
+        finally
+        {
+            shutdown.Cancel();
+            if (forwardDiagnostic is not null) diagnostics.Added -= forwardDiagnostic;
+            try { await Task.WhenAll(heartbeat, accountRefresh); }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException) { }
+            await client.DisposeAsync();
+            diagnostics.Info("Launcher plugin host connection closed.");
+        }
+    }
+
+    private static void DispatchHostMessage(PluginClient client, PluginClient.Envelope envelope, ManagedAccountRegistry managedAccounts, DiagnosticsLog diagnostics)
+    {
+        if (envelope.Type == "accounts.result")
+        {
+            var accounts = PluginClient.Deserialize<List<ManagedAccountSnapshot>>(envelope.Payload.GetProperty("accounts")) ?? [];
+            managedAccounts.Replace(accounts);
+        }
+        else if (envelope.Type == "account.updated")
+        {
+            var account = PluginClient.Deserialize<ManagedAccountSnapshot>(envelope.Payload.GetProperty("account"));
+            if (account is not null) managedAccounts.Upsert(account);
+        }
+        else if (envelope.Type == "account.exited")
+        {
+            var account = PluginClient.Deserialize<ManagedAccountSnapshot>(envelope.Payload.GetProperty("account"));
+            if (account is not null) managedAccounts.Remove(account.AccountId);
+        }
+        else if (envelope.Type == "account.events.subscribed")
+            diagnostics.Info("Launcher host accepted the account event subscription.");
+        else if (envelope.Type == "host.reject")
+        {
+            var reason = envelope.Payload.TryGetProperty("reason", out var reasonElement) ? reasonElement.GetString() : null;
+            var messageType = envelope.Payload.TryGetProperty("messageType", out var messageTypeElement) ? messageTypeElement.GetString() : null;
+            diagnostics.Error($"Host rejected {messageType ?? "a plugin request"}: {reason ?? "no reason supplied"}; account lists will still be polled periodically.");
+        }
+    }
+
+    private static async Task SendDiagnosticAsync(PluginClient client, DiagnosticEntry entry, CancellationToken cancellationToken)
     {
         try
         {
-            await client.ConnectAsync();
-            using var shutdown = new CancellationTokenSource();
-            await SendHeartbeatsAsync(client, shutdown.Token);
+            await client.SendAsync("diagnostic.log", new { level = entry.Level, message = entry.Message, utc = entry.Utc }, cancellationToken: cancellationToken);
         }
-        catch { await client.DisposeAsync(); }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException) { }
+    }
+    private static async Task RefreshAccountsAsync(PluginClient client, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            do
+            {
+                await client.SendAsync("accounts.list", new { }, Guid.NewGuid().ToString("N"), cancellationToken: cancellationToken);
+            }
+            while (await timer.WaitForNextTickAsync(cancellationToken));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
     }
     private static async Task SendHeartbeatsAsync(PluginClient client, CancellationToken cancellationToken)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
-        try { while (await timer.WaitForNextTickAsync(cancellationToken)) await client.SendAsync("plugin.heartbeat", new { utc = DateTime.UtcNow }, cancellationToken); }
+        try { while (await timer.WaitForNextTickAsync(cancellationToken)) await client.SendAsync("plugin.heartbeat", new { utc = DateTime.UtcNow }, cancellationToken: cancellationToken); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
     }
     protected override void OnExit(ExitEventArgs e) { _client?.DisposeAsync().AsTask().GetAwaiter().GetResult(); base.OnExit(e); }
 }
