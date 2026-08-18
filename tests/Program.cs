@@ -1,4 +1,5 @@
 using RamAfk;
+using System.Reflection;
 static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
 var settings = new KeepAliveSettings(TimeSpan.FromMinutes(17), TimeSpan.Zero, TimeSpan.FromSeconds(3));
 var calculator = new DueSetCalculator(settings, new Random(1));
@@ -10,6 +11,35 @@ var result = await service.TryKeepAliveAsync(new AccountIdleInfo("a", "A", now -
 Require(result.Accepted && sent == 1, "Keep-alive dispatch failed.");
 var second = await service.TryKeepAliveAsync(new AccountIdleInfo("a", "A", now - TimeSpan.FromMinutes(17), true), now.AddSeconds(1), CancellationToken.None);
 Require(!second.Accepted && second.Code is "spaced" or "already-kept-alive", "Duplicate keep-alive was not blocked.");
+var tokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".token");
+await File.WriteAllTextAsync(tokenPath, "test-token");
+var launchClient = PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--token-file", tokenPath, "--plugin-id", "io.github.codysimonds65.ram.afk", "--data", "test-data"]);
+Require(launchClient is not null && !File.Exists(tokenPath), "Plugin launch arguments did not preserve the host pipe and token-file values.");
+var pluginIdField = typeof(PluginClient).GetField("_pluginId", BindingFlags.Instance | BindingFlags.NonPublic);
+var tokenField = typeof(PluginClient).GetField("_token", BindingFlags.Instance | BindingFlags.NonPublic);
+Require((string?)pluginIdField?.GetValue(launchClient) == "io.github.codysimonds65.ram.afk", "Plugin launch arguments did not preserve the plugin ID.");
+Require((string?)tokenField?.GetValue(launchClient) == "test-token", "Plugin launch arguments did not preserve the token.");
+var parseMethod = typeof(PluginClient).GetMethod("TryParseArgs", BindingFlags.Static | BindingFlags.NonPublic);
+var parseArguments = new object?[] { new[] { "--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--data", "test-data" }, null };
+Require((bool?)parseMethod?.Invoke(null, parseArguments) == true, "Valid launch arguments were not parsed.");
+var parsedArguments = parseArguments[1] as IReadOnlyDictionary<string, string>;
+Require(parsedArguments is not null && parsedArguments["pipe"] == "test-pipe" && parsedArguments["data"] == "test-data", "Parsed pipe or data values were not preserved.");
+await launchClient!.DisposeAsync();
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe"]) is null, "A missing pipe value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token", "test-token"]) is null, "An empty pipe value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id"]) is null, "A missing plugin ID value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "", "--token", "test-token"]) is null, "An empty plugin ID was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token", ""]) is null, "An empty inline token was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token-file"]) is null, "A missing token-file value was accepted.");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token-file", Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".missing")]) is null, "A missing token file was not rejected safely.");
+var emptyTokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".empty-token");
+await File.WriteAllTextAsync(emptyTokenPath, "");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token-file", emptyTokenPath]) is null, "An empty token file was accepted.");
+var conflictTokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".conflict-token");
+await File.WriteAllTextAsync(conflictTokenPath, "file-token");
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token", "inline-token", "--token-file", conflictTokenPath]) is null, "Conflicting credential sources were accepted.");
+if (File.Exists(conflictTokenPath)) File.Delete(conflictTokenPath);
+Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "one", "--pipe", "two", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token", "test-token"]) is null, "Duplicate launch options were accepted.");
 Console.WriteLine("RAM AFK tests passed.");
 
 file sealed class FakeSender(Func<KeepAliveSendResult> callback) : IBackgroundKeepAliveSender { public Task<KeepAliveSendResult> SendSpaceAsync(string accountId, CancellationToken cancellationToken) => Task.FromResult(callback()); }
