@@ -1,5 +1,6 @@
 using RamAfk;
 using System.Reflection;
+using System.Text.Json;
 static void Require(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
 var settings = new KeepAliveSettings(TimeSpan.FromMinutes(17), TimeSpan.Zero, TimeSpan.FromSeconds(3));
 var calculator = new DueSetCalculator(settings, new Random(1));
@@ -40,6 +41,48 @@ await File.WriteAllTextAsync(conflictTokenPath, "file-token");
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token", "inline-token", "--token-file", conflictTokenPath]) is null, "Conflicting credential sources were accepted.");
 if (File.Exists(conflictTokenPath)) File.Delete(conflictTokenPath);
 Require(PluginClient.FromArgs(["--ram-plugin", "--pipe", "one", "--pipe", "two", "--plugin-id", "io.github.codysimonds65.ram.afk", "--token", "test-token"]) is null, "Duplicate launch options were accepted.");
+var snapshot = new ManagedAccountSnapshot("acc-1", "Test Account", 1234, 987654321, (nint)0x0012AB34, 10, 20, 800, 600, 96, false, new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), true, (nint)0x0012AB30);
+var jsonOptions = typeof(PluginClient).GetNestedType("Json", BindingFlags.NonPublic)!.GetField("Options", BindingFlags.Public | BindingFlags.Static)!.GetValue(null) as JsonSerializerOptions;
+Require(jsonOptions is not null, "The plugin JSON serializer options were not found.");
+var snapshotJson = JsonSerializer.Serialize(snapshot, jsonOptions);
+using (var document = JsonDocument.Parse(snapshotJson))
+{
+    var windowHandleProperty = document.RootElement.GetProperty("windowHandle");
+    Require(windowHandleProperty.ValueKind == JsonValueKind.Number && windowHandleProperty.GetInt64() == snapshot.WindowHandle.ToInt64(), "windowHandle did not serialize as a number.");
+    Require(document.RootElement.GetProperty("accountId").GetString() == "acc-1", "accountId did not round-trip through the converter.");
+}
+var decodedSnapshot = JsonSerializer.Deserialize<ManagedAccountSnapshot>(snapshotJson, jsonOptions);
+Require(decodedSnapshot == snapshot, "ManagedAccountSnapshot JSON round-trip failed.");
+var decodedFromElement = PluginClient.Deserialize<ManagedAccountSnapshot>(JsonDocument.Parse(snapshotJson).RootElement);
+Require(decodedFromElement == snapshot, "PluginClient.Deserialize failed to decode a managed-account snapshot.");
+var registry = new ManagedAccountRegistry();
+var changedCounts = new List<int>();
+registry.Changed += (_, count) => changedCounts.Add(count);
+var accountA = snapshot;
+var accountB = snapshot with { AccountId = "acc-2", Label = "Second Account" };
+var accountAUpdated = accountA with { LastActivityUtc = DateTime.UtcNow };
+registry.Replace([accountA, accountB]);
+Require(registry.Snapshot().Count == 2, "accounts.result did not replace the registry set.");
+registry.Replace([accountA, accountB]);
+Require(changedCounts.Count == 1, "An identical accounts.result re-raised Changed.");
+registry.Upsert(accountAUpdated);
+Require(changedCounts.Count == 2 && registry.Snapshot().Count == 2 && registry.Snapshot()[0] == accountAUpdated, "account.updated did not upsert the existing account.");
+registry.Upsert(accountA);
+Require(changedCounts.Count == 3 && registry.Snapshot()[0] == accountA, "account.updated did not replace the stale snapshot.");
+registry.Upsert(accountB with { IsRunning = false });
+Require(changedCounts.Count == 3 && registry.Snapshot().Count == 2, "A non-running snapshot was added to the registry.");
+registry.Remove("acc-2");
+Require(changedCounts.Count == 4 && registry.Snapshot().Count == 1 && registry.Snapshot()[0].AccountId == "acc-1", "account.exited did not remove the account.");
+registry.Replace([accountAUpdated, accountB with { IsRunning = false }]);
+Require(changedCounts.Count == 5 && registry.Snapshot().Count == 1 && registry.Snapshot()[0] == accountAUpdated, "accounts.result did not replace and filter the registry set.");
+registry.Replace([accountB]);
+Require(changedCounts.Count == 6 && registry.Snapshot().Count == 1 && registry.Snapshot()[0].AccountId == "acc-2", "accounts.result did not remove accounts absent from the poll result.");
+registry.Remove("acc-2");
+Require(changedCounts.Count == 7 && registry.Snapshot().Count == 0, "Final removal did not empty the registry.");
+using var manifestDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "plugin.json")));
+var capabilities = manifestDocument.RootElement.GetProperty("capabilities").EnumerateArray().Select(item => item.GetString()).ToArray();
+Require(capabilities.Contains("host.events.account-lifecycle"), "The manifest does not declare the account-lifecycle event capability.");
+Require(manifestDocument.RootElement.GetProperty("contractVersion").GetString() == "1.0", "The manifest contract version is not 1.0.");
 Console.WriteLine("RAM AFK tests passed.");
 
 file sealed class FakeSender(Func<KeepAliveSendResult> callback) : IBackgroundKeepAliveSender { public Task<KeepAliveSendResult> SendSpaceAsync(string accountId, CancellationToken cancellationToken) => Task.FromResult(callback()); }
