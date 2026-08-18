@@ -10,6 +10,11 @@ var result = await service.TryKeepAliveAsync(new AccountIdleInfo("a", "A", now -
 Require(result.Accepted && sent == 1, "Keep-alive dispatch failed.");
 var second = await service.TryKeepAliveAsync(new AccountIdleInfo("a", "A", now - TimeSpan.FromMinutes(17), true), now.AddSeconds(1), CancellationToken.None);
 Require(!second.Accepted && second.Code is "spaced" or "already-kept-alive", "Duplicate keep-alive was not blocked.");
+var tokenPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".token");
+await File.WriteAllTextAsync(tokenPath, "test-token");
+var launchClient = PluginClient.FromArgs(["--ram-plugin", "--pipe", "test-pipe", "--token-file", tokenPath, "--plugin-id", "io.github.codysimonds65.ram.afk", "--data", "test-data"]);
+Require(launchClient is not null && !File.Exists(tokenPath), "Plugin launch arguments did not preserve the host pipe and token-file values.");
+await launchClient!.DisposeAsync();
 Console.WriteLine("RAM AFK tests passed.");
 
 file sealed class FakeSender(Func<KeepAliveSendResult> callback) : IBackgroundKeepAliveSender { public Task<KeepAliveSendResult> SendSpaceAsync(string accountId, CancellationToken cancellationToken) => Task.FromResult(callback()); }
