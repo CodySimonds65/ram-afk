@@ -5,8 +5,8 @@
   "version": "0.1.1",
   "contractVersion": "1.0",
   "publisher": "CodySimonds65",
-  "description": "Staggered background keep-alive for enabled managed Roblox accounts.",
-  "capabilities": ["host.accounts.read", "host.events.account-lifecycle", "host.queries.account-activity", "host.input.background"],
+  "description": "Staggered foreground keep-alive for managed Roblox accounts; focus may switch briefly.",
+  "capabilities": ["host.accounts.read", "host.events.account-lifecycle", "host.queries.account-activity", "host.input.foreground.real"],
   "entryPoint": "ram-afk.exe",
   "autostartDefault": false
 }

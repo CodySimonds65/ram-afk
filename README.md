@@ -1,8 +1,8 @@
 # RAM AFK
 
-RAM AFK is a standalone Apache-2.0 plugin that keeps user-enabled managed Roblox clients alive with low-priority background Space messages. It schedules a 17-minute threshold with bounded early jitter, staggers simultaneous due accounts, postpones when a higher-priority action owns an account, retries one failed delivery after 30 seconds, and reports an unprotected account without attempting captcha interaction.
+RAM AFK is a standalone Apache-2.0 plugin that keeps user-enabled managed Roblox clients alive with low-priority foreground Space input. It schedules a 17-minute threshold with bounded early jitter, staggers simultaneous due accounts, postpones when a higher-priority action owns an account, retries one failed delivery after 30 seconds, and reports an unprotected account without attempting captcha interaction.
 
-Only activity timestamps and keep-alive results are modeled. No foreground activation or focus restoration is used.
+Each keep-alive briefly foregrounds the validated client through the host coordinator and restores the prior foreground client when safe. Focus may switch during delivery; user takeover cancels rather than fighting for focus. Legacy background-message consent is rejected with `foreground-required`.
 
 Build with the .NET 8 Windows SDK. The release package contains `plugin.json`, `ram-afk.exe`, `plugin.zip`, `plugin.sha256`, and a pinned Ed25519 signature.
 

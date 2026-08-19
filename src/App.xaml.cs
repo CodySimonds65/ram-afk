@@ -18,6 +18,7 @@ public partial class App : Application
         using var shutdown = new CancellationTokenSource();
         var heartbeat = Task.CompletedTask;
         var accountRefresh = Task.CompletedTask;
+        var schedulerTick = Task.CompletedTask;
         EventHandler<DiagnosticEntry>? forwardDiagnostic = null;
         try
         {
@@ -27,14 +28,16 @@ public partial class App : Application
             forwardDiagnostic = (_, entry) => _ = SendDiagnosticAsync(client, entry, shutdown.Token);
             diagnostics.Added += forwardDiagnostic;
             await client.SendAsync("account.events.subscribe", new { }, Guid.NewGuid().ToString("N"), shutdown.Token);
+            var scheduler = new KeepAliveScheduler(new ForegroundKeepAliveSender(client));
             heartbeat = SendHeartbeatsAsync(client, shutdown.Token);
             accountRefresh = RefreshAccountsAsync(client, shutdown.Token);
+            schedulerTick = RunSchedulerAsync(scheduler, shutdown.Token);
             while (true)
             {
                 var envelope = await client.ReceiveAsync(shutdown.Token); if (envelope is null) break;
                 try
                 {
-                    DispatchHostMessage(client, envelope, ((App)Current).ManagedAccounts, diagnostics);
+                    DispatchHostMessage(client, envelope, ((App)Current).ManagedAccounts, diagnostics, scheduler);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -51,29 +54,38 @@ public partial class App : Application
         {
             shutdown.Cancel();
             if (forwardDiagnostic is not null) diagnostics.Added -= forwardDiagnostic;
-            try { await Task.WhenAll(heartbeat, accountRefresh); }
+            try { await Task.WhenAll(heartbeat, accountRefresh, schedulerTick); }
             catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException) { }
             await client.DisposeAsync();
             diagnostics.Info("Launcher plugin host connection closed.");
         }
     }
 
-    private static void DispatchHostMessage(PluginClient client, PluginClient.Envelope envelope, ManagedAccountRegistry managedAccounts, DiagnosticsLog diagnostics)
+    private static void DispatchHostMessage(PluginClient client, PluginClient.Envelope envelope, ManagedAccountRegistry managedAccounts, DiagnosticsLog diagnostics, KeepAliveScheduler scheduler)
     {
         if (envelope.Type == "accounts.result")
         {
             var accounts = PluginClient.Deserialize<List<ManagedAccountSnapshot>>(envelope.Payload.GetProperty("accounts")) ?? [];
             managedAccounts.Replace(accounts);
+            scheduler.UpdateAccounts(accounts.Select(account => new AccountIdleInfo(account.AccountId, account.Label, account.LastActivityUtc, Enabled: true)), DateTime.UtcNow);
         }
         else if (envelope.Type == "account.updated")
         {
             var account = PluginClient.Deserialize<ManagedAccountSnapshot>(envelope.Payload.GetProperty("account"));
-            if (account is not null) managedAccounts.Upsert(account);
+            if (account is not null)
+            {
+                managedAccounts.Upsert(account);
+                scheduler.UpdateAccounts(managedAccounts.Snapshot().Select(item => new AccountIdleInfo(item.AccountId, item.Label, item.LastActivityUtc, Enabled: true)), DateTime.UtcNow);
+            }
         }
         else if (envelope.Type == "account.exited")
         {
             var account = PluginClient.Deserialize<ManagedAccountSnapshot>(envelope.Payload.GetProperty("account"));
-            if (account is not null) managedAccounts.Remove(account.AccountId);
+            if (account is not null)
+            {
+                managedAccounts.Remove(account.AccountId);
+                scheduler.UpdateAccounts(managedAccounts.Snapshot().Select(item => new AccountIdleInfo(item.AccountId, item.Label, item.LastActivityUtc, Enabled: true)), DateTime.UtcNow);
+            }
         }
         else if (envelope.Type == "account.events.subscribed")
             diagnostics.Info("Launcher host accepted the account event subscription.");
@@ -83,6 +95,17 @@ public partial class App : Application
             var messageType = envelope.Payload.TryGetProperty("messageType", out var messageTypeElement) ? messageTypeElement.GetString() : null;
             diagnostics.Error($"Host rejected {messageType ?? "a plugin request"}: {reason ?? "no reason supplied"}; account lists will still be polled periodically.");
         }
+    }
+
+    private static async Task RunSchedulerAsync(KeepAliveScheduler scheduler, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+                await scheduler.TickAsync(DateTime.UtcNow, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     private static async Task SendDiagnosticAsync(PluginClient client, DiagnosticEntry entry, CancellationToken cancellationToken)
