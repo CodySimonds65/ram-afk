@@ -22,8 +22,8 @@ public partial class MainWindow : Window
         refreshTimer.Start();
         RefreshAccountList();
     }
-    private void Enable_Click(object sender, RoutedEventArgs e) => StatusText.Text = "Selected accounts enabled; the host activity clock will schedule staggered background Space posts.";
-    private void Pause_Click(object sender, RoutedEventArgs e) { _paused = !_paused; StatusText.Text = _paused ? "All keep-alives paused." : "Keep-alives resumed."; }
+    private void Enable_Click(object sender, RoutedEventArgs e) => StatusText.Text = "Managed accounts enabled; AFK uses guarded foreground Space input and restores your prior client when safe.";
+    private void Pause_Click(object sender, RoutedEventArgs e) { _paused = !_paused; StatusText.Text = _paused ? "All keep-alives paused." : "Keep-alives resumed; focus may switch briefly during delivery."; }
 
     private void ManagedAccounts_Changed(object? sender, int count)
     {
